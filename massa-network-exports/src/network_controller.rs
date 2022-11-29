@@ -30,6 +30,8 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub struct NetworkCommandSender(pub mpsc::Sender<NetworkCommand>);
 
+
+// TODO: refactor
 impl NetworkCommandSender {
     /// ban node(s) by id(s)
     pub async fn node_ban_by_ids(&self, ids: Vec<NodeId>) -> Result<(), NetworkError> {
