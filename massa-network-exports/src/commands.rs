@@ -79,7 +79,7 @@ use massa_models::{
     stats::NetworkStats,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::Sender;
+use crossbeam_channel::Sender;
 use std::{collections::HashMap, net::IpAddr};
 use tokio::sync::oneshot;
 

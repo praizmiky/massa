@@ -2374,6 +2374,7 @@ dependencies = [
 name = "massa_network_exports"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "displaydoc",
  "enum-map",
  "massa_hash",
@@ -2394,6 +2395,7 @@ dependencies = [
 name = "massa_network_worker"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "enum-map",
  "futures",
  "itertools",

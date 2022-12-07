@@ -16,8 +16,8 @@ use massa_models::{
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
-    sync::mpsc::{channel, Receiver, Sender},
 };
+use crossbeam_channel::{Sender, Receiver, bounded};
 use tokio::{
     sync::{
         mpsc::{self, error::TrySendError},
@@ -129,7 +129,7 @@ impl NetworkCommandSender {
 
     /// Send the order to get peers.
     pub fn get_peers(&self) -> Result<Peers, NetworkError> {
-        let (response_tx, response_rx) = channel();
+        let (response_tx, response_rx) = bounded(1);
         self.0
             .send(NetworkCommand::GetPeers(response_tx))
             .map_err(|_| NetworkError::ChannelError("could not send GetPeers command".into()))?;
@@ -142,7 +142,7 @@ impl NetworkCommandSender {
 
     /// get network stats
     pub fn get_network_stats(&self) -> Result<NetworkStats, NetworkError> {
-        let (response_tx, response_rx) = channel();
+        let (response_tx, response_rx) = bounded(1);
         self.0
             .send(NetworkCommand::GetStats { response_tx })
             .map_err(|_| NetworkError::ChannelError("could not send GetStats command".into()))?;
@@ -153,7 +153,7 @@ impl NetworkCommandSender {
 
     /// Send the order to get bootstrap peers.
     pub fn get_bootstrap_peers(&self) -> Result<BootstrapPeers, NetworkError> {
-        let (response_tx, response_rx) = channel::<BootstrapPeers>();
+        let (response_tx, response_rx) = bounded::<BootstrapPeers>(1);
         self.0
             .send(NetworkCommand::GetBootstrapPeers(response_tx))
             .map_err(|_| {
@@ -234,7 +234,7 @@ impl NetworkCommandSender {
 
     /// Sign a message using the node's keypair
     pub fn node_sign_message(&self, msg: Vec<u8>) -> Result<PubkeySig, NetworkError> {
-        let (response_tx, response_rx) = channel();
+        let (response_tx, response_rx) = bounded(1);
         self.0
             .send(NetworkCommand::NodeSignMessage { msg, response_tx })
             .map_err(|_| {

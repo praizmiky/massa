@@ -23,6 +23,8 @@ use std::{
     collections::{hash_map, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
+use crossbeam_channel::{select, bounded, tick, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
@@ -42,9 +44,9 @@ pub struct NetworkWorker {
     /// Database with peer information.
     pub(crate) peer_info_db: PeerInfoDatabase,
     /// Receiver for network commands
-    controller_command_rx: mpsc::Receiver<NetworkCommand>,
+    controller_command_rx: Receiver<NetworkCommand>,
     /// Receiver for network management commands
-    controller_manager_rx: mpsc::Receiver<NetworkManagementCommand>,
+    controller_manager_rx: Receiver<NetworkManagementCommand>,
     /// Set of connection id of node with running handshake.
     pub(crate) running_handshakes: HashSet<ConnectionId>,
     /// Running handshakes futures.
@@ -67,9 +69,9 @@ pub struct NetworkWorker {
 }
 
 pub struct NetworkWorkerChannels {
-    pub controller_command_rx: mpsc::Receiver<NetworkCommand>,
-    pub controller_event_tx: mpsc::Sender<NetworkEvent>,
-    pub controller_manager_rx: mpsc::Receiver<NetworkManagementCommand>,
+    pub controller_command_rx: Receiver<NetworkCommand>,
+    pub controller_event_tx: Sender<NetworkEvent>,
+    pub controller_manager_rx: Receiver<NetworkManagementCommand>,
 }
 
 impl NetworkWorker {
@@ -125,12 +127,12 @@ impl NetworkWorker {
 
     /// Runs the main loop of the network worker
     /// There is a `tokio::select!` inside the loop
-    pub async fn run_loop(mut self) -> Result<(), NetworkError> {
+    pub fn run_loop(mut self) -> Result<(), NetworkError> {
         let mut out_connecting_futures = FuturesUnordered::new();
         let mut cur_connection_id = ConnectionId::default();
 
         // wake up the controller at a regular interval to retry connections
-        let mut wakeup_interval = tokio::time::interval(self.cfg.wakeup_interval.to_duration());
+        let mut wakeup_interval = tick(self.cfg.wakeup_interval.to_duration());
         let mut need_connect_retry = true;
 
         loop {
@@ -168,7 +170,7 @@ impl NetworkWorker {
                     * out connecting events (no problem if a bit late)
                     * listener event (HIGH FREQUENCY) non-critical
             */
-            tokio::select! {
+            select! {
                 // listen to manager commands
                 cmd = self.controller_manager_rx.recv() => {
                     match cmd {
@@ -177,137 +179,19 @@ impl NetworkWorker {
                     }
                 },
 
-                // event received from a node
-                evt = self.node_event_rx.recv() => {
-                    self.on_node_event(
-                        evt.ok_or_else(|| NetworkError::ChannelError("node event rx failed".into()))?
-                    ).await?
-                },
-
                 // incoming command
                 Some(cmd) = self.controller_command_rx.recv() => {
                     self.manage_network_command(cmd).await?;
                 },
 
                 // wake up interval
-                _ = wakeup_interval.tick() => {
+                _ = wakeup_interval.recv() => {
                     self.peer_info_db.update()?; // notify tick to peer db
 
                     need_connect_retry = true; // retry out connections
                 }
-
-                // wait for a handshake future to complete
-                Some(res) = self.handshake_futures.next() => {
-                    let (conn_id, outcome) = res?;
-                    self.on_handshake_finished(conn_id, outcome).await?;
-                    need_connect_retry = true; // retry out connections
-                },
-
-                // Managing handshakes that return a PeerList
-                Some(_) = self.handshake_peer_list_futures.next() => {},
-
-                // node closed
-                Some(evt) = self.node_worker_handles.next() => {
-                    let (node_id, res) = evt?;  // ? => when a node worker panics
-                    let reason = match res {
-                        Ok(r) => {
-                            massa_trace!("network.network_worker.run_loop.node_worker_handles.normal", {
-                                "node_id": node_id,
-                                "reason": r,
-                            });
-                            r
-                        },
-                        Err(err) => {
-                            massa_trace!("network.network_worker.run_loop.node_worker_handles.err", {
-                                "node_id": node_id,
-                                "err": format!("{}", err)
-                            });
-                            ConnectionClosureReason::Failed
-                        }
-                    };
-
-                    // Note: if the send is dropped, and we later receive a command related to an unknown node,
-                    // we will retry a send for this event for that unknown node,
-                    // ensuring protocol eventually notes the closure.
-                    let _ = self
-                        .event.send(NetworkEvent::ConnectionClosed(node_id))
-                        .await;
-                    if let Some((connection_id, _)) = self
-                        .active_nodes
-                        .remove(&node_id) {
-                        massa_trace!("protocol channel closed", {"node_id": node_id});
-                        self.connection_closed(connection_id, reason).await?;
-                    }
-
-                    need_connect_retry = true; // retry out connections
-                },
-
-                // out-connector event
-                Some((ip_addr, res)) = out_connecting_futures.next() => {
-                    need_connect_retry = true; // retry out connections
-                    self.manage_out_connections(
-                        res,
-                        ip_addr,
-                        &mut cur_connection_id,
-                    ).await?
-                },
-
-                // listener socket received
-                res = self.listener.accept() => {
-                    self.manage_in_connections(
-                        res,
-                        &mut cur_connection_id,
-                    ).await?
-                }
             }
         }
-
-        // wait for out-connectors to finish
-        while out_connecting_futures.next().await.is_some() {}
-
-        // stop peer info db
-        self.peer_info_db.stop().await?;
-
-        // Cleanup of connected nodes.
-        // drop sender
-        self.event.drop();
-        for (_, (_, node_tx)) in self.active_nodes.drain() {
-            // close opened connection.
-            trace!("before sending  NodeCommand::Close(ConnectionClosureReason::Normal) from node_tx in network_worker run_loop");
-            // send a close command to every node
-            // note that we ignore any error here because nodes might have closed by themselves just before
-            let _ = node_tx
-                .send(NodeCommand::Close(ConnectionClosureReason::Normal))
-                .await;
-            trace!("after sending  NodeCommand::Close(ConnectionClosureReason::Normal) from node_tx in network_worker run_loop");
-        }
-        // drain incoming node events
-        while self.node_event_rx.recv().await.is_some() {}
-        // wait for node join handles
-        while let Some(res) = self.node_worker_handles.next().await {
-            match res {
-                Ok((node_id, Ok(reason))) => {
-                    massa_trace!("network.network_worker.cleanup.wait_node.ok", {
-                        "node_id": node_id,
-                        "reason": reason,
-                    });
-                }
-                Ok((node_id, Err(err))) => {
-                    massa_trace!("network.network_worker.cleanup.wait_node.err", {
-                        "node_id": node_id,
-                        "err": format!("{}", err)
-                    });
-                }
-                Err(err) => {
-                    warn!("a node worker panicked: {}", err);
-                }
-            }
-        }
-
-        // wait for all running handshakes
-        self.running_handshakes.clear();
-        while self.handshake_futures.next().await.is_some() {}
-        while self.handshake_peer_list_futures.next().await.is_some() {}
         Ok(())
     }
 

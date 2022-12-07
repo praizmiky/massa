@@ -18,6 +18,8 @@ use massa_network_exports::{
     NetworkEvent, NetworkEventReceiver, NetworkManagementCommand, NetworkManager,
 };
 use massa_signature::KeyPair;
+use crossbeam_channel::{select, bounded, tick, Receiver, Sender};
+use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -104,13 +106,13 @@ pub async fn start_network_controller(
 
     // launch controller
     let (command_tx, controller_command_rx) =
-        mpsc::channel::<NetworkCommand>(network_settings.controller_channel_size);
+        bounded::<NetworkCommand>(network_settings.controller_channel_size);
     let (controller_event_tx, event_rx) =
-        mpsc::channel::<NetworkEvent>(network_settings.event_channel_size);
-    let (manager_tx, controller_manager_rx) = mpsc::channel::<NetworkManagementCommand>(1);
+        bounded::<NetworkEvent>(network_settings.event_channel_size);
+    let (manager_tx, controller_manager_rx) = channel::<NetworkManagementCommand>(1);
     let cfg_copy = network_settings.clone();
     let keypair_cloned = keypair.clone();
-    let join_handle = tokio::spawn(async move {
+    let join_handle = thread::spawn(move || {
         let res = NetworkWorker::new(
             cfg_copy,
             keypair_cloned,
@@ -124,8 +126,7 @@ pub async fn start_network_controller(
             },
             version,
         )
-        .run_loop()
-        .await;
+        .run_loop();
         match res {
             Err(err) => {
                 error!("network worker crashed: {}", err);
