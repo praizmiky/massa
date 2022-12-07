@@ -79,6 +79,7 @@ use massa_models::{
     stats::NetworkStats,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::Sender;
 use std::{collections::HashMap, net::IpAddr};
 use tokio::sync::oneshot;
 
@@ -175,9 +176,9 @@ pub enum NetworkCommand {
         header: WrappedHeader,
     },
     /// `(PeerInfo, Vec <(NodeId, bool)>) peer info + list` of associated Id nodes in connection out (true)
-    GetPeers(oneshot::Sender<Peers>),
+    GetPeers(Sender<Peers>),
     /// get peers for bootstrap server
-    GetBootstrapPeers(oneshot::Sender<BootstrapPeers>),
+    GetBootstrapPeers(Sender<BootstrapPeers>),
     /// Ban a list of peer by their node id
     NodeBanByIds(Vec<NodeId>),
     /// Ban a list of peer by their ip address
@@ -199,12 +200,12 @@ pub enum NetworkCommand {
         /// arbitrary message
         msg: Vec<u8>,
         /// response channels
-        response_tx: oneshot::Sender<PubkeySig>,
+        response_tx: Sender<PubkeySig>,
     },
     /// gets network stats
     GetStats {
         /// response channels
-        response_tx: oneshot::Sender<NetworkStats>,
+        response_tx: Sender<NetworkStats>,
     },
     /// Send a batch of full operations
     SendOperations {
