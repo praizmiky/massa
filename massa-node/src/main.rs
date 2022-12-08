@@ -8,7 +8,7 @@ use crate::settings::SETTINGS;
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use dialoguer::Password;
-use massa_api::{APIConfig, Private, Public, RpcServer, StopHandle, API};
+use massa_api::{APIConfig, ApiServer, ApiV2, Private, Public, RpcServer, StopHandle, API};
 use massa_async_pool::AsyncPoolConfig;
 use massa_bootstrap::{get_state, start_bootstrap_server, BootstrapConfig, BootstrapManager};
 use massa_consensus_exports::events::ConsensusEvent;
@@ -84,6 +84,7 @@ async fn launch(
     NetworkManager,
     Box<dyn FactoryManager>,
     mpsc::Receiver<()>,
+    StopHandle,
     StopHandle,
     StopHandle,
 ) {
@@ -480,6 +481,7 @@ async fn launch(
     let api_config: APIConfig = APIConfig {
         bind_private: SETTINGS.api.bind_private,
         bind_public: SETTINGS.api.bind_public,
+        bind_api: SETTINGS.api.bind_api,
         draw_lookahead_period_count: SETTINGS.api.draw_lookahead_period_count,
         max_arguments: SETTINGS.api.max_arguments,
         openrpc_spec_path: SETTINGS.api.openrpc_spec_path.clone(),
@@ -504,6 +506,18 @@ async fn launch(
         t0: T0,
         periods_per_cycle: PERIODS_PER_CYCLE,
     };
+
+    // spawn Massa API
+    let api = API::<ApiV2>::new(consensus_controller.clone(), api_config.clone(), *VERSION);
+    let api_handle = api
+        .serve(&SETTINGS.api.bind_api, &api_config)
+        .await
+        .expect("failed to start MASSA API");
+
+    // Disable WebSockets for Private and Public API's
+    let mut api_config = api_config.clone();
+    api_config.enable_ws = false;
+
     // spawn private API
     let (api_private, api_private_stop_rx) = API::<Private>::new(
         network_command_sender.clone(),
@@ -578,6 +592,7 @@ async fn launch(
         api_private_stop_rx,
         api_private_handle,
         api_public_handle,
+        api_handle,
     )
 }
 
@@ -606,6 +621,7 @@ async fn stop(
     }: Managers,
     api_private_handle: StopHandle,
     api_public_handle: StopHandle,
+    api_handle: StopHandle,
 ) {
     // stop bootstrap
     if let Some(bootstrap_manager) = bootstrap_manager {
@@ -620,6 +636,9 @@ async fn stop(
 
     // stop private API
     api_private_handle.stop();
+
+    // stop Massa API
+    api_handle.stop();
 
     // stop factory
     factory_manager.stop();
@@ -748,6 +767,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             mut api_private_stop_rx,
             api_private_handle,
             api_public_handle,
+            api_handle,
         ) = launch(node_wallet.clone()).await;
 
         // interrupt signal listener
@@ -812,6 +832,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             },
             api_private_handle,
             api_public_handle,
+            api_handle,
         )
         .await;
 
