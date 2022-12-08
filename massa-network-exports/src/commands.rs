@@ -70,6 +70,7 @@
 //! remember which node know what.
 
 use crate::{BootstrapPeers, ConnectionClosureReason, Peers};
+use crossbeam_channel::Sender;
 use massa_models::{
     block::{BlockId, WrappedHeader},
     composite::PubkeySig,
@@ -79,7 +80,6 @@ use massa_models::{
     stats::NetworkStats,
 };
 use serde::{Deserialize, Serialize};
-use crossbeam_channel::Sender;
 use std::{collections::HashMap, net::IpAddr};
 use tokio::sync::oneshot;
 

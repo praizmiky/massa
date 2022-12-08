@@ -24,7 +24,11 @@ pub struct MockNetworkController {
 
 impl MockNetworkController {
     /// new mock network controller
-    pub fn new() -> (Self, NetworkCommandSender, NetworkEventReceiver) {
+    pub fn new() -> (
+        Self,
+        mpsc::Sender<NetworkCommand>,
+        mpsc::Receiver<NetworkEvent>,
+    ) {
         let (network_command_tx, network_command_rx) =
             mpsc::channel::<NetworkCommand>(CHANNEL_SIZE);
         let (network_event_tx, network_event_rx) = mpsc::channel::<NetworkEvent>(CHANNEL_SIZE);
@@ -33,8 +37,8 @@ impl MockNetworkController {
                 network_event_tx,
                 network_command_rx,
             },
-            NetworkCommandSender(network_command_tx),
-            NetworkEventReceiver(network_event_rx),
+            network_command_tx,
+            network_event_rx,
         )
     }
 

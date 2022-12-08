@@ -5,6 +5,7 @@ use crate::{
     error::NetworkError,
     BlockInfoReply, BootstrapPeers, NetworkCommand, NetworkEvent, Peers,
 };
+use crossbeam_channel::{bounded, Receiver, Sender};
 use massa_models::{
     block::{BlockId, WrappedHeader},
     composite::PubkeySig,
@@ -13,17 +14,14 @@ use massa_models::{
     operation::{OperationPrefixIds, WrappedOperation},
     stats::NetworkStats,
 };
+use std::thread::JoinHandle;
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
 };
-use crossbeam_channel::{Sender, Receiver, bounded};
-use tokio::{
-    sync::{
-        mpsc::{self, error::TrySendError},
-        oneshot,
-    },
-    task::JoinHandle,
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    oneshot,
 };
 use tracing::{info, warn};
 
@@ -285,7 +283,10 @@ impl NetworkManager {
         info!("stopping network manager...");
         drop(self.manager_tx);
         let _remaining_events = network_event_receiver.drain();
-        let _ = self.join_handle.await?;
+        let _ = self
+            .join_handle
+            .join()
+            .expect("Failed to join on the network worker thread.");
         info!("network manager stopped");
         Ok(())
     }

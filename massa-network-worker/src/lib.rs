@@ -11,6 +11,7 @@ use crate::{
     network_worker::{NetworkWorker, NetworkWorkerChannels},
     peer_info_database::PeerInfoDatabase,
 };
+use crossbeam_channel::{bounded, select, tick, Receiver, Sender};
 use massa_logging::massa_trace;
 use massa_models::{node::NodeId, version::Version};
 use massa_network_exports::{
@@ -18,7 +19,6 @@ use massa_network_exports::{
     NetworkEvent, NetworkEventReceiver, NetworkManagementCommand, NetworkManager,
 };
 use massa_signature::KeyPair;
-use crossbeam_channel::{select, bounded, tick, Receiver, Sender};
 use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -109,7 +109,7 @@ pub async fn start_network_controller(
         bounded::<NetworkCommand>(network_settings.controller_channel_size);
     let (controller_event_tx, event_rx) =
         bounded::<NetworkEvent>(network_settings.event_channel_size);
-    let (manager_tx, controller_manager_rx) = channel::<NetworkManagementCommand>(1);
+    let (manager_tx, controller_manager_rx) = bounded::<NetworkManagementCommand>(1);
     let cfg_copy = network_settings.clone();
     let keypair_cloned = keypair.clone();
     let join_handle = thread::spawn(move || {

@@ -10,6 +10,7 @@ use crate::{
     messages::{Message, MessageDeserializer},
     network_event::EventSender,
 };
+use crossbeam_channel::{bounded, select, tick, Receiver, Sender};
 use futures::{stream::FuturesUnordered, StreamExt};
 use massa_logging::massa_trace;
 use massa_models::{node::NodeId, version::Version};
@@ -19,14 +20,12 @@ use massa_network_exports::{
     NetworkManagementCommand, NodeCommand, NodeEvent, NodeEventType, ReadHalf, WriteHalf,
 };
 use massa_signature::KeyPair;
+use std::thread::{self, JoinHandle};
 use std::{
     collections::{hash_map, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
-use crossbeam_channel::{select, bounded, tick, Receiver, Sender};
-use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
 /// Real job is done by network worker
@@ -128,33 +127,12 @@ impl NetworkWorker {
     /// Runs the main loop of the network worker
     /// There is a `tokio::select!` inside the loop
     pub fn run_loop(mut self) -> Result<(), NetworkError> {
-        let mut out_connecting_futures = FuturesUnordered::new();
-        let mut cur_connection_id = ConnectionId::default();
-
         // wake up the controller at a regular interval to retry connections
         let mut wakeup_interval = tick(self.cfg.wakeup_interval.to_duration());
         let mut need_connect_retry = true;
 
         loop {
             if need_connect_retry {
-                // try to connect to candidate IPs
-                let candidate_ips = self.peer_info_db.get_out_connection_candidate_ips()?;
-                for ip in candidate_ips {
-                    debug!("starting outgoing connection attempt towards ip={}", ip);
-                    massa_trace!("out_connection_attempt_start", { "ip": ip });
-                    self.peer_info_db.new_out_connection_attempt(&ip)?;
-                    let mut connector = self
-                        .establisher
-                        .get_connector(self.cfg.connect_timeout)
-                        .await?;
-                    let addr = SocketAddr::new(ip, self.cfg.protocol_port);
-                    out_connecting_futures.push(async move {
-                        match connector.connect(addr).await {
-                            Ok((reader, writer)) => (addr.ip(), Ok((reader, writer))),
-                            Err(e) => (addr.ip(), Err(e)),
-                        }
-                    });
-                }
                 need_connect_retry = false;
             }
 
@@ -172,24 +150,26 @@ impl NetworkWorker {
             */
             select! {
                 // listen to manager commands
-                cmd = self.controller_manager_rx.recv() => {
+                recv(self.controller_manager_rx) -> cmd => {
                     match cmd {
-                        None => break,
-                        Some(_) => {}
+                        Err(_) => break,
+                        Ok(_) => {}
                     }
                 },
 
                 // incoming command
-                Some(cmd) = self.controller_command_rx.recv() => {
-                    self.manage_network_command(cmd).await?;
+                recv(self.controller_command_rx) -> cmd => {
+                    if let Ok(cmd) = cmd {
+                        self.manage_network_command(cmd)?;
+                    }
                 },
 
                 // wake up interval
-                _ = wakeup_interval.recv() => {
+                recv(wakeup_interval) -> _ => {
                     self.peer_info_db.update()?; // notify tick to peer db
 
                     need_connect_retry = true; // retry out connections
-                }
+                },
             }
         }
         Ok(())
@@ -287,7 +267,6 @@ impl NetworkWorker {
                             (new_node_id, res)
                         });
                         entry.insert((new_connection_id, node_command_tx.clone()));
-                        self.node_worker_handles.push(node_fn_handle);
 
                         let res = self
                             .event
@@ -295,18 +274,7 @@ impl NetworkWorker {
                             .await;
 
                         // If we failed to send the event to protocol, close the connection.
-                        if res.is_err() {
-                            let res = node_command_tx
-                                .send(NodeCommand::Close(ConnectionClosureReason::Normal))
-                                .await;
-                            if res.is_err() {
-                                massa_trace!(
-                                    "network.network_worker.on_handshake_finished", {"err": NetworkError::ChannelError(
-                                        "close node command send failed".into(),
-                                    ).to_string()}
-                                );
-                            }
-                        }
+                        if res.is_err() {}
                     }
                 }
             }
@@ -392,44 +360,42 @@ impl NetworkWorker {
     /// `network_cmd_impl.rs` where the commands are implemented.
     ///
     /// ex: `NetworkCommand::AskForBlocks` => `on_ask_bfor_block_cmd(...)`
-    async fn manage_network_command(&mut self, cmd: NetworkCommand) -> Result<(), NetworkError> {
+    fn manage_network_command(&mut self, cmd: NetworkCommand) -> Result<(), NetworkError> {
         use crate::network_cmd_impl::*;
         match cmd {
-            NetworkCommand::NodeBanByIps(ips) => on_node_ban_by_ips_cmd(self, ips).await?,
-            NetworkCommand::NodeBanByIds(ids) => on_node_ban_by_ids_cmd(self, ids).await?,
+            NetworkCommand::NodeBanByIps(ips) => on_node_ban_by_ips_cmd(self, ips)?,
+            NetworkCommand::NodeBanByIds(ids) => on_node_ban_by_ids_cmd(self, ids)?,
             NetworkCommand::SendBlockHeader { node, header } => {
-                on_send_block_header_cmd(self, node, header).await?
+                on_send_block_header_cmd(self, node, header)?
             }
-            NetworkCommand::AskForBlocks { list } => on_ask_for_block_cmd(self, list).await,
+            NetworkCommand::AskForBlocks { list } => on_ask_for_block_cmd(self, list),
             NetworkCommand::SendBlockInfo { node, info } => {
-                on_send_block_info_cmd(self, node, info).await?
+                on_send_block_info_cmd(self, node, info)?
             }
-            NetworkCommand::GetPeers(response_tx) => on_get_peers_cmd(self, response_tx).await,
+            NetworkCommand::GetPeers(response_tx) => on_get_peers_cmd(self, response_tx),
             NetworkCommand::GetBootstrapPeers(response_tx) => {
-                on_get_bootstrap_peers_cmd(self, response_tx).await
+                on_get_bootstrap_peers_cmd(self, response_tx)
             }
             NetworkCommand::SendOperations { node, operations } => {
-                on_send_operations_cmd(self, node, operations).await
+                on_send_operations_cmd(self, node, operations)
             }
             NetworkCommand::SendOperationAnnouncements { to_node, batch } => {
-                on_send_operation_batches_cmd(self, to_node, batch).await
+                on_send_operation_batches_cmd(self, to_node, batch)
             }
             NetworkCommand::AskForOperations { to_node, wishlist } => {
-                on_ask_for_operations_cmd(self, to_node, wishlist).await
+                on_ask_for_operations_cmd(self, to_node, wishlist)
             }
             NetworkCommand::SendEndorsements { node, endorsements } => {
-                on_send_endorsements_cmd(self, node, endorsements).await
+                on_send_endorsements_cmd(self, node, endorsements)
             }
             NetworkCommand::NodeSignMessage { msg, response_tx } => {
-                on_node_sign_message_cmd(self, msg, response_tx).await?
+                on_node_sign_message_cmd(self, msg, response_tx)?
             }
-            NetworkCommand::NodeUnbanByIds(ids) => on_node_unban_by_ids_cmd(self, ids).await?,
-            NetworkCommand::NodeUnbanByIps(ips) => on_node_unban_by_ips_cmd(self, ips).await?,
-            NetworkCommand::GetStats { response_tx } => on_get_stats_cmd(self, response_tx).await,
-            NetworkCommand::Whitelist(ips) => on_whitelist_cmd(self, ips).await?,
-            NetworkCommand::RemoveFromWhitelist(ips) => {
-                on_remove_from_whitelist_cmd(self, ips).await?
-            }
+            NetworkCommand::NodeUnbanByIds(ids) => on_node_unban_by_ids_cmd(self, ids)?,
+            NetworkCommand::NodeUnbanByIps(ips) => on_node_unban_by_ips_cmd(self, ips)?,
+            NetworkCommand::GetStats { response_tx } => on_get_stats_cmd(self, response_tx),
+            NetworkCommand::Whitelist(ips) => on_whitelist_cmd(self, ips)?,
+            NetworkCommand::RemoveFromWhitelist(ips) => on_remove_from_whitelist_cmd(self, ips)?,
         };
         Ok(())
     }
@@ -595,44 +561,6 @@ impl NetworkWorker {
             let max_op_datastore_entry_count = self.cfg.max_op_datastore_entry_count;
             let max_op_datastore_key_length = self.cfg.max_op_datastore_key_length;
             let max_op_datastore_value_length = self.cfg.max_op_datastore_value_length;
-            self.handshake_peer_list_futures
-                .push(tokio::spawn(async move {
-                    let mut writer = WriteBinder::new(writer, max_bytes_read, max_message_size);
-                    let mut reader = ReadBinder::new(
-                        reader,
-                        max_bytes_write,
-                        max_message_size,
-                        MessageDeserializer::new(
-                            thread_count,
-                            endorsement_count,
-                            max_advertise_length,
-                            max_ask_blocks,
-                            max_operations_per_block,
-                            max_operations_per_message,
-                            max_endorsements_per_message,
-                            max_datastore_value_length,
-                            max_function_name_length,
-                            max_parameters_size,
-                            max_op_datastore_entry_count,
-                            max_op_datastore_key_length,
-                            max_op_datastore_value_length,
-                        ),
-                    );
-                    match tokio::time::timeout(
-                        timeout,
-                        futures::future::try_join(writer.send(&msg), reader.next()),
-                    )
-                    .await
-                    {
-                        Ok(Err(e)) => {
-                            massa_trace!("Ignored network error when sending peer list", {
-                                "error": format!("{:?}", e)
-                            })
-                        }
-                        Err(_) => massa_trace!("Ignored timeout error when sending peer list", {}),
-                        _ => (),
-                    }
-                }));
         }
     }
 
@@ -653,17 +581,6 @@ impl NetworkWorker {
                 HandshakeErrorType::HandshakeIdAlreadyExist(format!("{}", connection_id)),
             ));
         }
-        self.handshake_futures.push(HandshakeWorker::spawn(
-            reader,
-            writer,
-            self.self_node_id,
-            self.keypair.clone(),
-            self.cfg.connect_timeout,
-            self.version,
-            connection_id,
-            self.cfg.max_bytes_read,
-            self.cfg.max_bytes_write,
-        ));
         Ok(())
     }
 

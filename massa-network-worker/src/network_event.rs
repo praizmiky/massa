@@ -1,12 +1,13 @@
+use crossbeam_channel::{bounded, select, tick, Receiver, SendTimeoutError, Sender};
 use massa_models::node::NodeId;
 use massa_network_exports::{ConnectionId, NetworkError, NetworkEvent, NodeCommand, NodeEvent};
 use std::time::Duration;
-use tokio::sync::mpsc::{self, error::SendTimeoutError};
+use tokio::sync::mpsc;
 use tracing::debug;
 
 pub struct EventSender {
     /// Sender for network events
-    controller_event_tx: mpsc::Sender<NetworkEvent>,
+    controller_event_tx: Sender<NetworkEvent>,
     /// Channel for sending node events.
     node_event_tx: mpsc::Sender<NodeEvent>,
     /// Max time spend to wait
@@ -15,7 +16,7 @@ pub struct EventSender {
 
 impl EventSender {
     pub fn new(
-        controller_event_tx: mpsc::Sender<NetworkEvent>,
+        controller_event_tx: Sender<NetworkEvent>,
         node_event_tx: mpsc::Sender<NodeEvent>,
         max_send_wait: Duration,
     ) -> Self {
@@ -29,11 +30,10 @@ impl EventSender {
     pub async fn send(&self, event: NetworkEvent) -> Result<(), NetworkError> {
         let result = self
             .controller_event_tx
-            .send_timeout(event, self.max_send_wait)
-            .await;
+            .send_timeout(event, self.max_send_wait);
         match result {
             Ok(()) => return Ok(()),
-            Err(SendTimeoutError::Closed(event)) => {
+            Err(SendTimeoutError::Disconnected(event)) => {
                 debug!(
                     "Failed to send NetworkEvent due to channel closure: {:?}.",
                     event
