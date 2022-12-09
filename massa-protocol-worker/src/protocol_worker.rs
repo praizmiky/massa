@@ -324,10 +324,10 @@ impl ProtocolWorker {
             if !new_ops.is_empty() {
                 node_info.insert_known_ops(new_ops.iter().map(|id| id.prefix()));
 
-                let res = self
-                    .network_command_sender
-                    .announce_operations(*node, new_ops.iter().map(|id| id.into_prefix()).collect())
-                    .await;
+                let res = self.network_command_sender.announce_operations(
+                    *node,
+                    new_ops.iter().map(|id| id.into_prefix()).collect(),
+                );
                 if let Err(err) = res {
                     debug!("could not send operation batch to node {}: {}", node, err);
                 }
@@ -388,8 +388,7 @@ impl ProtocolWorker {
             if !to_send.is_empty() {
                 let res = self
                     .network_command_sender
-                    .send_endorsements(*node, to_send)
-                    .await;
+                    .send_endorsements(*node, to_send);
                 if let Err(err) = res {
                     debug!(
                         "could not send endorsements batch to node {}: {}",
@@ -432,7 +431,6 @@ impl ProtocolWorker {
                         massa_trace!("protocol.protocol_worker.process_command.integrated_block.send_header", { "node": node_id, "block_id": block_id});
                         self.network_command_sender
                             .send_block_header(*node_id, header.clone())
-                            .await
                             .map_err(|_| {
                                 ProtocolError::ChannelError(
                                     "send block header network command send failed".into(),
@@ -726,7 +724,6 @@ impl ProtocolWorker {
             //});
             self.network_command_sender
                 .ask_for_block_list(ask_block_list)
-                .await
                 .map_err(|_| {
                     ProtocolError::ChannelError("ask for block node command send failed".into())
                 })?;
@@ -747,7 +744,6 @@ impl ProtocolWorker {
         }
         self.network_command_sender
             .node_ban_by_ids(vec![*node_id])
-            .await
             .map_err(|_| ProtocolError::ChannelError("Ban node command send failed".into()))?;
         Ok(())
     }

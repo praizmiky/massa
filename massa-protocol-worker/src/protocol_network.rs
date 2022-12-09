@@ -210,7 +210,6 @@ impl ProtocolWorker {
         }
         self.network_command_sender
             .send_block_info(from_node_id, all_blocks_info)
-            .await
             .map_err(|_| {
                 ProtocolError::ChannelError("send block info network command send failed".into())
             })

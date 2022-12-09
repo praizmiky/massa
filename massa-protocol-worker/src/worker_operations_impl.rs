@@ -127,7 +127,6 @@ impl ProtocolWorker {
         if !ask_set.is_empty() {
             self.network_command_sender
                 .send_ask_for_operations(node_id, ask_set)
-                .await
                 .map_err(|_| ProtocolError::ChannelError("send ask for operations failed".into()))
         } else {
             Ok(())
@@ -227,9 +226,7 @@ impl ProtocolWorker {
             }
         }
         if !ops.is_empty() {
-            self.network_command_sender
-                .send_operations(node_id, ops)
-                .await?;
+            self.network_command_sender.send_operations(node_id, ops)?;
         }
         Ok(())
     }
