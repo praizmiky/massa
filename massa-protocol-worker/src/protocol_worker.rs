@@ -260,10 +260,6 @@ impl ProtocolWorker {
                 }
 
                 // listen to network controller events
-                evt = self.network_event_receiver.wait_event() => {
-                    massa_trace!("protocol.protocol_worker.run_loop.network_event_rx", {});
-                    self.on_network_event(evt?, &mut block_ask_timer, &mut operation_announcement_interval).await?;
-                }
 
                 // block ask timer
                 _ = &mut block_ask_timer => {
