@@ -81,7 +81,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_sign_message(&self, message: Vec<u8>) -> RpcResult<PubkeySig> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.node_sign_message(message).await {
+        match network_command_sender.node_sign_message(message) {
             Ok(public_key_signature) => return Ok(public_key_signature),
             Err(e) => return Err(ApiError::from(e).into()),
         };
@@ -132,7 +132,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_ban_by_ip(&self, ips: Vec<IpAddr>) -> RpcResult<()> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.node_ban_by_ips(ips).await {
+        match network_command_sender.node_ban_by_ips(ips) {
             Ok(()) => return Ok(()),
             Err(e) => return Err(ApiError::from(e).into()),
         };
@@ -140,7 +140,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_ban_by_id(&self, ids: Vec<NodeId>) -> RpcResult<()> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.node_ban_by_ids(ids).await {
+        match network_command_sender.node_ban_by_ids(ids) {
             Ok(()) => return Ok(()),
             Err(e) => return Err(ApiError::from(e).into()),
         };
@@ -148,7 +148,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_unban_by_id(&self, ids: Vec<NodeId>) -> RpcResult<()> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.node_unban_by_ids(ids).await {
+        match network_command_sender.node_unban_by_ids(ids) {
             Ok(()) => return Ok(()),
             Err(e) => return Err(ApiError::from(e).into()),
         };
@@ -156,7 +156,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_unban_by_ip(&self, ips: Vec<IpAddr>) -> RpcResult<()> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.node_unban_ips(ips).await {
+        match network_command_sender.node_unban_ips(ips) {
             Ok(()) => return Ok(()),
             Err(e) => return Err(ApiError::from(e).into()),
         };
@@ -215,7 +215,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_whitelist(&self, ips: Vec<IpAddr>) -> RpcResult<()> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.whitelist(ips).await {
+        match network_command_sender.whitelist(ips) {
             Ok(()) => return Ok(()),
             Err(e) => return Err(ApiError::from(e).into()),
         };
@@ -223,7 +223,7 @@ impl MassaRpcServer for API<Private> {
 
     async fn node_remove_from_whitelist(&self, ips: Vec<IpAddr>) -> RpcResult<()> {
         let network_command_sender = self.0.network_command_sender.clone();
-        match network_command_sender.remove_from_whitelist(ips).await {
+        match network_command_sender.remove_from_whitelist(ips) {
             Ok(()) => return Ok(()),
             Err(e) => return Err(ApiError::from(e).into()),
         };
