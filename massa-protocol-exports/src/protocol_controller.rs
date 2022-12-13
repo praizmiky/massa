@@ -12,7 +12,8 @@ use massa_models::{
 use massa_network_exports::NetworkEventReceiver;
 use massa_storage::Storage;
 use serde::Serialize;
-use tokio::{sync::mpsc, task::JoinHandle};
+use std::thread::{self, JoinHandle};
+use tokio::sync::mpsc;
 use tracing::info;
 
 /// block result: map block id to
@@ -154,7 +155,7 @@ impl ProtocolManager {
     pub async fn stop(self) -> Result<NetworkEventReceiver, ProtocolError> {
         info!("stopping protocol controller...");
         drop(self.manager_tx);
-        let network_event_receiver = self.join_handle.await??;
+        let network_event_receiver = self.join_handle.join().unwrap()?;
         info!("protocol controller stopped");
         Ok(network_event_receiver)
     }

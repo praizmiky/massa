@@ -24,12 +24,15 @@ use massa_protocol_exports::{
     ProtocolCommand, ProtocolConfig, ProtocolError, ProtocolManagementCommand, ProtocolManager,
 };
 
+use crossbeam_channel::{after, bounded, select, tick, Receiver, Sender};
 use massa_models::wrapped::Id;
 use massa_storage::Storage;
 use massa_time::{MassaTime, TimeError};
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::pin::Pin;
+use std::thread;
+use std::time::Duration;
 use tokio::{
     sync::mpsc,
     time::{sleep, sleep_until, Instant, Sleep},
@@ -46,11 +49,11 @@ use tracing::{debug, error, info, warn};
 /// * `network_command_sender`: the `NetworkCommandSender` we interact with
 /// * `network_event_receiver`: the `NetworkEventReceiver` we interact with
 /// * `storage`: Shared storage to fetch data that are fetch across all modules
-pub async fn start_protocol_controller(
+pub fn start_protocol_controller(
     config: ProtocolConfig,
     network_command_sender: NetworkCommandSender,
     network_event_receiver: NetworkEventReceiver,
-    protocol_command_receiver: mpsc::Receiver<ProtocolCommand>,
+    protocol_command_receiver: Receiver<ProtocolCommand>,
     consensus_controller: Box<dyn ConsensusController>,
     pool_controller: Box<dyn PoolController>,
     storage: Storage,
@@ -60,7 +63,7 @@ pub async fn start_protocol_controller(
     // launch worker
     let (manager_tx, controller_manager_rx) = mpsc::channel::<ProtocolManagementCommand>(1);
     let pool_controller = pool_controller.clone();
-    let join_handle = tokio::spawn(async move {
+    let join_handle = thread::spawn(move || {
         let res = ProtocolWorker::new(
             config,
             ProtocolWorkerChannels {
@@ -73,8 +76,7 @@ pub async fn start_protocol_controller(
             pool_controller,
             storage,
         )
-        .run_loop()
-        .await;
+        .run_loop();
         match res {
             Err(err) => {
                 error!("protocol worker crashed: {}", err);
@@ -219,18 +221,14 @@ impl ProtocolWorker {
     /// And at the end every thing is closed properly
     /// Consensus work is managed here.
     /// It's mostly a `tokio::select!` within a loop.
-    pub async fn run_loop(mut self) -> Result<NetworkEventReceiver, ProtocolError> {
+    pub fn run_loop(mut self) -> Result<NetworkEventReceiver, ProtocolError> {
         // TODO: Config variable for the moment 10000 (prune) (100 seconds)
-        let operation_prune_timer = sleep(self.config.asked_operations_pruning_period.into());
-        tokio::pin!(operation_prune_timer);
-        let block_ask_timer = sleep(self.config.ask_block_timeout.into());
-        tokio::pin!(block_ask_timer);
+        let operation_prune_timer = after(self.config.asked_operations_pruning_period.into());
+        let mut block_ask_timer = after(self.config.ask_block_timeout.into());
         let operation_batch_proc_period_timer =
-            sleep(self.config.operation_batch_proc_period.into());
-        tokio::pin!(operation_batch_proc_period_timer);
+            after(self.config.operation_batch_proc_period.into());
         let operation_announcement_interval =
-            sleep(self.config.operation_announcement_interval.into());
-        tokio::pin!(operation_announcement_interval);
+            after(self.config.operation_announcement_interval.into());
         loop {
             massa_trace!("protocol.protocol_worker.run_loop.begin", {});
             /*
@@ -242,9 +240,9 @@ impl ProtocolWorker {
                     * network events (high frequency): process incoming events
                     * ask for blocks (timing not important)
             */
-            tokio::select! {
+            select! {
                 // listen to management commands
-                cmd = self.controller_manager_rx.recv() => {
+                recv(self.controller_manager_rx) -> cmd => {
                     massa_trace!("protocol.protocol_worker.run_loop.controller_manager_rx", { "cmd": cmd });
                     match cmd {
                         None => break,
@@ -253,7 +251,7 @@ impl ProtocolWorker {
                 }
 
                 // listen to incoming commands
-                Some(cmd) = self.controller_command_rx.recv() => {
+                recv(self.controller_command_rx) -> Some(cmd) => {
                     self.process_command(cmd, &mut
                         block_ask_timer,
                         &mut operation_announcement_interval).await?;
@@ -262,9 +260,9 @@ impl ProtocolWorker {
                 // listen to network controller events
 
                 // block ask timer
-                _ = &mut block_ask_timer => {
+                rev(block_ask_timer) -> _ => {
                     massa_trace!("protocol.protocol_worker.run_loop.block_ask_timer", { });
-                    self.update_ask_block(&mut block_ask_timer).await?;
+                    block_ask_timer = self.update_ask_block(&mut block_ask_timer)?;
                 }
 
                 // Operation announcement interval.
@@ -526,12 +524,12 @@ impl ProtocolWorker {
         Ok(())
     }
 
-    pub(crate) async fn update_ask_block(
+    pub(crate) fn update_ask_block(
         &mut self,
         ask_block_timer: &mut Pin<&mut Sleep>,
-    ) -> Result<(), ProtocolError> {
+    ) -> Result<Duration, ProtocolError> {
         massa_trace!("protocol.protocol_worker.update_ask_block.begin", {});
-        let now = Instant::now();
+        let now = std::time::Instant::now();
 
         // init timer
         let mut next_tick = now
@@ -725,10 +723,7 @@ impl ProtocolWorker {
                 })?;
         }
 
-        // reset timer
-        ask_block_timer.set(sleep_until(next_tick));
-
-        Ok(())
+        Ok(next_tick.elapsed())
     }
 
     /// Ban a node.
