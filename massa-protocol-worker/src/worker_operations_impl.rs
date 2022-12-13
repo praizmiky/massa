@@ -11,6 +11,7 @@
 use std::collections::VecDeque;
 
 use crate::protocol_worker::ProtocolWorker;
+use crossbeam_channel::{after, bounded, select, tick, Receiver, Sender};
 use massa_logging::massa_trace;
 use massa_models::{
     node::NodeId,
@@ -20,7 +21,8 @@ use massa_models::{
 use massa_protocol_exports::ProtocolError;
 use massa_time::TimeError;
 use std::pin::Pin;
-use tokio::time::{sleep_until, Instant, Sleep};
+use std::time::{Duration, Instant};
+use tokio::time::{sleep_until, Sleep};
 use tracing::warn;
 
 /// Structure containing a Batch of `operation_ids` we would like to ask
@@ -59,7 +61,7 @@ impl ProtocolWorker {
     ///        op_batch_buf.push(now+op_batch_proc_period, node_id, future_set)
     ///    ask ask_set to node_id
     ///```
-    pub(crate) async fn on_operations_announcements_received(
+    pub(crate) fn on_operations_announcements_received(
         &mut self,
         mut op_batch: OperationPrefixIds,
         node_id: NodeId,
@@ -137,40 +139,29 @@ impl ProtocolWorker {
     /// - Update the cache `received_operations` ids and each
     ///   `node_info.known_operations`
     /// - Notify the operations to he local node, to be propagated
-    pub(crate) async fn on_operations_received(
+    pub(crate) fn on_operations_received(
         &mut self,
         node_id: NodeId,
         operations: Vec<WrappedOperation>,
-        op_timer: &mut Pin<&mut Sleep>,
     ) {
-        if let Err(err) = self
-            .note_operations_from_node(operations, &node_id, op_timer)
-            .await
-        {
+        if let Err(err) = self.note_operations_from_node(operations, &node_id) {
             warn!("node {} sent us critically incorrect operation, which may be an attack attempt by the remote node or a loss of sync between us and the remote node. Err = {}", node_id, err);
-            let _ = self.ban_node(&node_id).await;
+            let _ = self.ban_node(&node_id);
         }
     }
 
     /// Clear the `asked_operations` data structure and reset
     /// `ask_operations_timer`
-    pub(crate) fn prune_asked_operations(
-        &mut self,
-        ask_operations_timer: &mut std::pin::Pin<&mut Sleep>,
-    ) -> Result<(), ProtocolError> {
+    pub(crate) fn prune_asked_operations(&mut self) -> Result<Duration, ProtocolError> {
         self.asked_operations.clear();
         // reset timer
         let instant = Instant::now()
             .checked_add(self.config.asked_operations_pruning_period.into())
             .ok_or(TimeError::TimeOverflowError)?;
-        ask_operations_timer.set(sleep_until(instant));
-        Ok(())
+        Ok(instant.elapsed())
     }
 
-    pub(crate) async fn update_ask_operation(
-        &mut self,
-        operation_batch_proc_period_timer: &mut std::pin::Pin<&mut Sleep>,
-    ) -> Result<(), ProtocolError> {
+    pub(crate) fn update_ask_operation(&mut self) -> Result<Duration, ProtocolError> {
         let now = Instant::now();
         while !self.op_batch_buffer.is_empty()
         // This unwrap is ok because we checked that it's not empty just before.
@@ -180,26 +171,24 @@ impl ProtocolWorker {
             self.on_operations_announcements_received(
                 op_batch_item.operations_prefix_ids,
                 op_batch_item.node_id,
-            )
-            .await?;
+            )?;
         }
         // reset timer
-        if let Some(item) = self.op_batch_buffer.front() {
-            operation_batch_proc_period_timer.set(sleep_until(item.instant));
+        let timer = if let Some(item) = self.op_batch_buffer.front() {
+            item.instant.elapsed()
         } else {
             let next_tick = now
                 .checked_add(self.config.operation_batch_proc_period.into())
                 .ok_or(TimeError::TimeOverflowError)?;
-            operation_batch_proc_period_timer.set(sleep_until(next_tick));
-        }
-
-        Ok(())
+            next_tick.elapsed()
+        };
+        Ok(timer)
     }
 
     /// Process the reception of a batch of asked operations, that means that
     /// we have already sent a batch of ids in the network, notifying that we already
     /// have those operations.
-    pub(crate) async fn on_asked_operations_received(
+    pub(crate) fn on_asked_operations_received(
         &mut self,
         node_id: NodeId,
         op_pre_ids: OperationPrefixIds,
